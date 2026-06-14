@@ -3,6 +3,7 @@ idf_component_register(
         main.cpp
         llm.cpp
         ui.cpp
+        tts.cpp
         model_data.cpp
         tok_data.cpp
         keyboard/Keyboard.cpp

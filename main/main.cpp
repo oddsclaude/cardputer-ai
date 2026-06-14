@@ -10,9 +10,13 @@
 // trained on ("Summary: <your text>\nStory:", so asking for "a dragon who
 // learns to share" gets a story about exactly that. Raw mode feeds your text
 // in unchanged (plain completion).
+//
+// G0 (BOOT button / GPIO0): toggles TTS. When enabled, the bot’s reply is
+// spoken through the speaker after each response using formant synthesis.
 
 #include <M5Unified.h>
 #include <esp_random.h>
+#include <driver/gpio.h>
 #include <string>
 #include <math.h>
 #include <string.h>
@@ -21,11 +25,8 @@
 #include "llm.h"
 #include "ui.h"
 #include "port.h"
+#include "tts.h"
 
-// Symbols defined by the generated model_data.cpp and tok_data.cpp (produced
-// by tools/convert_tinystories_instruct.py). They land in the .rodata section,
-// which the ESP32-S3 maps from flash directly into the data address space — so
-// inference reads them as if they were ordinary RAM.
 extern "C" const uint8_t MODEL_DATA[];
 extern "C" const size_t  MODEL_DATA_LEN;
 extern "C" const uint8_t TOKENIZER_DATA[];
@@ -35,12 +36,8 @@ static Transformer    transformer;
 static Tokenizer      tokenizer;
 static Sampler        sampler;
 static ChatUI         ui;
-static Keyboard_Class Keyboard;   // vendored M5Cardputer driver (main/keyboard/)
+static Keyboard_Class Keyboard;
 
-// KV-cache window. dim=128 × 8 layers × (k+v) at int8 ≈ 2 KB per position
-// (llm.cpp stores the GPT-Neo cache as int8 with per-row scales); 80 positions
-// ≈ 165 KB, sharing ~280 KB free heap with the 48 KB logits buffer. The
-// converter keeps 256 position embeddings, so flash isn't the limit — RAM is.
 static constexpr int KV_SEQ_LEN = 80;
 static constexpr float DEFAULT_TEMP = 0.8f;
 
@@ -55,7 +52,7 @@ static int   clampi(int v, int lo, int hi)       { return v < lo ? lo : (v > hi 
 enum ChatMode { M_CHAT, M_STORY, M_RAW };
 
 struct Settings {
-  float temp      = DEFAULT_TEMP;     // 0.0 = greedy (argmax)
+  float temp      = DEFAULT_TEMP;
   int   max_reply = 44;               // tokens per reply; -1 = unlimited (stop at KV or EOS);
                                       // -2 = unsafe (wrap KV pos, run until EOS fires)
   int   mode      = M_CHAT;
@@ -94,7 +91,7 @@ static void adjustSetting(int dir) {
     case 1:
       settings.temp = roundf((settings.temp + 0.1f * dir) * 10.0f) / 10.0f;
       settings.temp = clampf(settings.temp, 0.0f, 2.0f);
-      sampler.temperature = settings.temp;        // takes effect immediately
+      sampler.temperature = settings.temp;
       break;
     case 2:
       if      (dir < 0 && settings.max_reply == -1) settings.max_reply = -2;
@@ -111,11 +108,8 @@ static void adjustSetting(int dir) {
   drawSettings();
 }
 
-// ---------- Chat history (chat mode only) ----------
-//
-// The fine-tune's format is "User: <u>\nBot: <b><|endoftext|>\nUser: ..." —
-// we rebuild exactly that token stream every turn, inserting eos_id between
-// exchanges by hand (the EOS string isn't reachable through BPE merges).
+// ---------- Chat history ----------
+
 static constexpr int HIST_MAX = 4;
 static std::string hist_user[HIST_MAX], hist_bot[HIST_MAX];
 static int         hist_n = 0;
@@ -141,16 +135,22 @@ static void leaveSettings() {
   ui.statusf("T=%.1f  len=%d  [tab] settings", settings.temp, settings.max_reply);
 }
 
+// ---------- TTS ----------
+
+static bool tts_enabled = false;
+
+// ---------- Generation ----------
+
 struct GenState {
   bool active = false;
   int pos = 0, next = 0, token = 0, n_prompt = 0;
   int* prompt_tokens = nullptr;
   uint32_t t_start_ms = 0;
   int tokens_out = 0;
-  std::string user_text;   // chat mode: pending exchange for the history
+  std::string user_text;
   std::string bot_text;
-  bool pending_nl = false; // hold back a lone "\n" until we know what follows
-  bool wrapped    = false; // true if unsafe mode has wrapped pos (context corrupted)
+  bool pending_nl = false;
+  bool wrapped    = false;
 } gen;
 
 static void initModel() {
@@ -163,15 +163,12 @@ static void initModel() {
                                  transformer.config.vocab_size)) {
     ui.fatal("tokenizer init failed");
   }
-  // model_data.cpp and tok_data.cpp are generated as a pair; a stale build
-  // cache that mixes generations produces silent gibberish. Refuse to run.
   if (tokenizer.vocab_size != transformer.config.vocab_size) {
     ui.fatal("model/tokenizer vocab mismatch - clean rebuild needed");
   }
   llm_build_sampler(&sampler, transformer.config.vocab_size, DEFAULT_TEMP, esp_random());
 }
 
-// Encode `text` into gen.prompt_tokens starting at *n (bounds-checked).
 static bool appendSegment(const std::string& text, int cap, int* n) {
   int  m = 0;
   int* tmp = (int*) malloc(sizeof(int) * (text.length() + 8));
@@ -184,15 +181,9 @@ static bool appendSegment(const std::string& text, int cap, int* n) {
 }
 
 static void beginGeneration(const std::string& user_text) {
-  // Prompt shapes (chat/story match the two training formats):
-  //   chat : User: <u1>\nBot: <b1><eos>\nUser: <u2>\nBot:
-  //   story: Summary: <text>\nStory:
-  //   raw  : <text>
   const bool neo = (tokenizer.style == ARCH_GPTNEO);
   int mode = neo ? settings.mode : M_RAW;
 
-  // Leave room for the reply: everything the prompt doesn't use, the model
-  // can spend on talking back.
   int budget = KV_SEQ_LEN - (settings.max_reply >= 0 ? settings.max_reply : 0) - 1;
   if (budget < 8) budget = 8;
 
@@ -202,8 +193,6 @@ static void beginGeneration(const std::string& user_text) {
 
   int n = 0;
   if (mode == M_CHAT) {
-    // Encode each candidate segment once; include newest exchanges first
-    // until the budget is full, then emit oldest -> newest.
     int* seg_toks[HIST_MAX + 1];
     int  seg_len[HIST_MAX + 1];
     std::string segs[HIST_MAX + 1];
@@ -218,10 +207,10 @@ static void beginGeneration(const std::string& user_text) {
       if (seg_toks[i])
         llm_encode(&tokenizer, segs[i].c_str(), 0, 0, seg_toks[i], &seg_len[i]);
     }
-    int first = hist_n;                         // oldest exchange included
+    int first = hist_n;
     total = seg_len[hist_n];
     while (first > 0 && total + seg_len[first-1] + 2 <= budget) {
-      total += seg_len[first-1] + 2;            // +eos +"\n" joiners
+      total += seg_len[first-1] + 2;
       first--;
     }
     if (total <= budget) {
@@ -234,7 +223,6 @@ static void beginGeneration(const std::string& user_text) {
       memcpy(gen.prompt_tokens + n, seg_toks[hist_n], seg_len[hist_n] * sizeof(int));
       n += seg_len[hist_n];
     } else {
-      // Current message alone overflows: truncate it and re-add "\nBot:".
       n = (budget - 4 < seg_len[hist_n]) ? budget - 4 : seg_len[hist_n];
       memcpy(gen.prompt_tokens, seg_toks[hist_n], n * sizeof(int));
       appendSegment("\nBot:", budget + 8, &n);
@@ -252,7 +240,6 @@ static void beginGeneration(const std::string& user_text) {
     if (neo) {
       appendSegment(user_text, budget, &n);
     } else {
-      // LLaMA path keeps its BOS + SentencePiece behaviour.
       llm_encode(&tokenizer, user_text.c_str(), 1, 0, gen.prompt_tokens, &n);
       if (n > budget) n = budget;
     }
@@ -283,12 +270,15 @@ static void finishReply() {
     historyClear();
     ui.statusf("context wrapped - %d tokens - new convo", total_tok);
   }
+  if (tts_enabled && !gen.bot_text.empty()) {
+    tts_speak(gen.bot_text.c_str());
+  }
 }
 
 static void stepGeneration() {
   if (gen.pos >= KV_SEQ_LEN - 1) {
     if (settings.max_reply == -2) {
-      gen.pos     = gen.n_prompt;  // wrap: overwrite output KV region, keep going
+      gen.pos     = gen.n_prompt;
       gen.wrapped = true;
     } else {
       finishReply(); return;
@@ -314,9 +304,6 @@ static void stepGeneration() {
     char scratch[32];
     const char* piece = llm_decode(&tokenizer, gen.token, gen.next, scratch, sizeof(scratch));
     if (piece && *piece) {
-      // The fine-tune normally ends replies with EOS, but if the model
-      // starts a "\nUser:" turn instead, cut it there. A lone newline is
-      // held back one step so it never gets printed before we know.
       if (settings.mode == M_CHAT && tokenizer.style == ARCH_GPTNEO) {
         if (gen.pending_nl) {
           if (strncmp(piece, "User", 4) == 0) { finishReply(); return; }
@@ -340,19 +327,26 @@ static void stepGeneration() {
   gen.pos++;
 }
 
+static void updateStatusBar() {
+  ui.statusf("%s  T=%.1f  /new  [tab] settings",
+             tts_enabled ? "TTS:ON" : "TinyChat-3M", settings.temp);
+}
+
 static void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
-  Keyboard.begin();    // picks IOMatrix or TCA8418 reader from M5.getBoard()
+  Keyboard.begin();
   ui.begin();
+
+  // GPIO0 (BOOT button) as input with pull-up.
+  gpio_set_direction(GPIO_NUM_0, GPIO_MODE_INPUT);
+  gpio_set_pull_mode(GPIO_NUM_0, GPIO_PULLUP_ONLY);
 
   ui.status("TinyStories booting...");
   initModel();
 
   ui.ready();
-  ui.statusf("%s  T=%.1f  /new resets  [tab] settings",
-             transformer.config.arch == ARCH_GPTNEO ? "TinyChat-3M" : "TinyLLama-v0",
-             settings.temp);
+  updateStatusBar();
   state = ST_CHAT;
 }
 
@@ -360,6 +354,15 @@ static void loop() {
   M5.update();
   Keyboard.updateKeyList();
   Keyboard.updateKeysState();
+
+  // G0 toggle: detect falling edge (button press, active-low).
+  static bool g0_prev = true;
+  bool g0_now = gpio_get_level(GPIO_NUM_0);
+  if (!g0_now && g0_prev && state == ST_CHAT && !gen.active) {
+    tts_enabled = !tts_enabled;
+    updateStatusBar();
+  }
+  g0_prev = g0_now;
 
   if (state == ST_SETTINGS) {
     if (Keyboard.isChange() && Keyboard.isPressed()) {
@@ -389,15 +392,13 @@ static void loop() {
   }
   if (Keyboard.isChange() && Keyboard.isPressed()) {
     auto st = Keyboard.keysState();
-    if (st.tab) {                      // open settings (only when idle)
+    if (st.tab) {
       state = ST_SETTINGS;
       sett_sel = 0;
       drawSettings();
       return;
     }
     if (st.fn) {
-      // fn+; / fn+. are the up/down arrows on the Cardputer keyboard —
-      // scroll the chat history (2 lines per press).
       for (char c : st.word) {
         if (c == ';') ui.scrollChat(+2);
         if (c == '.') ui.scrollChat(-2);
@@ -409,7 +410,7 @@ static void loop() {
         std::string prompt = ui.takeInput();
         if (prompt == "/new") {
           historyClear();
-          ui.statusf("new conversation  [tab] settings");
+          updateStatusBar();
         } else if (prompt.length()) {
           ui.appendUser(prompt);
           beginGeneration(prompt);
@@ -423,8 +424,6 @@ extern "C" void app_main(void) {
   setup();
   for (;;) {
     loop();
-    // Full speed while generating (one token per iteration); when idle, a
-    // 1 ms tick (CONFIG_FREERTOS_HZ=1000) is plenty for keyboard polling.
     if (!gen.active) vTaskDelay(1);
   }
 }
