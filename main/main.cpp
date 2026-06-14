@@ -130,12 +130,12 @@ static void historyClear() {
 
 static void drawHelp() {
   static const std::string keys[] = {
-    "tab", "fn", "backtick", "fn + ;", "fn + .", "/new"
+    "tab", "fn", "backtick", "fn + ;", "fn + ."
   };
   static const std::string acts[] = {
-    "open settings", "toggle TTS", "stop generation", "scroll up", "scroll down", "new chat"
+    "open settings", "toggle TTS", "stop generation", "scroll up", "scroll down"
   };
-  ui.showSettings("Keybinds", keys, acts, 6, -1);
+  ui.showSettings("Keybinds", keys, acts, 5, -1);
 }
 
 static void leaveSettings() {

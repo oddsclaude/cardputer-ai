@@ -144,7 +144,7 @@ static void synth_one(uint8_t idx) {
         float out = s_r1.tick(exc) * 0.50f
                   + s_r2.tick(exc) * 0.35f
                   + s_r3.tick(exc) * 0.15f;
-        out *= 12000.f;
+        out *= 28000.f;
         if (out >  32767.f) out =  32767.f;
         if (out < -32767.f) out = -32767.f;
         s_buf[i] = (int16_t)out;
