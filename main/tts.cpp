@@ -144,9 +144,9 @@ static void synth_one(uint8_t idx) {
         float out = s_r1.tick(exc) * 0.50f
                   + s_r2.tick(exc) * 0.35f
                   + s_r3.tick(exc) * 0.15f;
-        out *= 5500.f;
-        if (out >  32000.f) out =  32000.f;
-        if (out < -32000.f) out = -32000.f;
+        out *= 12000.f;
+        if (out >  32767.f) out =  32767.f;
+        if (out < -32767.f) out = -32767.f;
         s_buf[i] = (int16_t)out;
     }
 
@@ -160,7 +160,7 @@ void tts_speak(const char* text) {
     if (!text || !*text) return;
 
     M5.Speaker.begin();
-    M5.Speaker.setVolume(200);
+    M5.Speaker.setVolume(255);
 
     s_phase = 0.f;
     s_r1 = {}; s_r2 = {}; s_r3 = {};
