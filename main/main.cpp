@@ -11,8 +11,8 @@
 // learns to share" gets a story about exactly that. Raw mode feeds your text
 // in unchanged (plain completion).
 //
-// opt: opens settings. alt: toggles TTS. When TTS is enabled, the bot’s reply
-// is spoken through the speaker after each response using formant synthesis.
+// fn: toggles TTS. When TTS is enabled, the bot’s reply is spoken through the
+// speaker after each response using formant synthesis.
 
 #include <M5Unified.h>
 #include <esp_random.h>
@@ -131,7 +131,7 @@ static void historyClear() {
 static void leaveSettings() {
   state = ST_CHAT;
   ui.repaint();
-  ui.statusf("T=%.1f  len=%d  [opt] settings", settings.temp, settings.max_reply);
+  ui.statusf("T=%.1f  len=%d  [tab] settings", settings.temp, settings.max_reply);
 }
 
 // ---------- TTS ----------
@@ -327,7 +327,7 @@ static void stepGeneration() {
 }
 
 static void updateStatusBar() {
-  ui.statusf("%s  T=%.1f  /new  [opt] settings",
+  ui.statusf("%s  T=%.1f  /new  [tab] settings",
              tts_enabled ? "TTS:ON" : "TinyChat-3M", settings.temp);
 }
 
@@ -370,25 +370,27 @@ static void loop() {
     ui.tickGenerating(gen.tokens_out);
     if (Keyboard.isChange() && Keyboard.isPressed()) {
       auto st = Keyboard.keysState();
-      if (st.shift) { finishReply(); return; }
+      for (char c : st.word) {
+        if (c == '`') { finishReply(); return; }
+      }
     }
     stepGeneration();
     return;
   }
   if (Keyboard.isChange() && Keyboard.isPressed()) {
     auto st = Keyboard.keysState();
-    if (st.opt) {
+    if (st.tab) {
       state = ST_SETTINGS;
       sett_sel = 0;
       drawSettings();
       return;
     }
-    if (st.alt && !gen.active) {
-      tts_enabled = !tts_enabled;
-      updateStatusBar();
-      return;
-    }
     if (st.fn) {
+      if (st.word.empty()) {
+        tts_enabled = !tts_enabled;
+        updateStatusBar();
+        return;
+      }
       for (char c : st.word) {
         if (c == ';') ui.scrollChat(+2);
         if (c == '.') ui.scrollChat(-2);
