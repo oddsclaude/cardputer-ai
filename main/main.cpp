@@ -11,12 +11,11 @@
 // learns to share" gets a story about exactly that. Raw mode feeds your text
 // in unchanged (plain completion).
 //
-// G0 (BOOT button / GPIO0): toggles TTS. When enabled, the bot’s reply is
-// spoken through the speaker after each response using formant synthesis.
+// opt: opens settings. alt: toggles TTS. When TTS is enabled, the bot’s reply
+// is spoken through the speaker after each response using formant synthesis.
 
 #include <M5Unified.h>
 #include <esp_random.h>
-#include <driver/gpio.h>
 #include <string>
 #include <math.h>
 #include <string.h>
@@ -132,7 +131,7 @@ static void historyClear() {
 static void leaveSettings() {
   state = ST_CHAT;
   ui.repaint();
-  ui.statusf("T=%.1f  len=%d  [tab] settings", settings.temp, settings.max_reply);
+  ui.statusf("T=%.1f  len=%d  [opt] settings", settings.temp, settings.max_reply);
 }
 
 // ---------- TTS ----------
@@ -328,7 +327,7 @@ static void stepGeneration() {
 }
 
 static void updateStatusBar() {
-  ui.statusf("%s  T=%.1f  /new  [tab] settings",
+  ui.statusf("%s  T=%.1f  /new  [opt] settings",
              tts_enabled ? "TTS:ON" : "TinyChat-3M", settings.temp);
 }
 
@@ -338,9 +337,6 @@ static void setup() {
   Keyboard.begin();
   ui.begin();
 
-  // GPIO0 (BOOT button) as input with pull-up.
-  gpio_set_direction(GPIO_NUM_0, GPIO_MODE_INPUT);
-  gpio_set_pull_mode(GPIO_NUM_0, GPIO_PULLUP_ONLY);
 
   ui.status("TinyStories booting...");
   initModel();
@@ -354,15 +350,6 @@ static void loop() {
   M5.update();
   Keyboard.updateKeyList();
   Keyboard.updateKeysState();
-
-  // G0 toggle: detect falling edge (button press, active-low).
-  static bool g0_prev = true;
-  bool g0_now = gpio_get_level(GPIO_NUM_0);
-  if (!g0_now && g0_prev && state == ST_CHAT && !gen.active) {
-    tts_enabled = !tts_enabled;
-    updateStatusBar();
-  }
-  g0_prev = g0_now;
 
   if (state == ST_SETTINGS) {
     if (Keyboard.isChange() && Keyboard.isPressed()) {
@@ -383,19 +370,22 @@ static void loop() {
     ui.tickGenerating(gen.tokens_out);
     if (Keyboard.isChange() && Keyboard.isPressed()) {
       auto st = Keyboard.keysState();
-      for (char c : st.word) {
-        if (c == '`') { finishReply(); return; }
-      }
+      if (st.shift) { finishReply(); return; }
     }
     stepGeneration();
     return;
   }
   if (Keyboard.isChange() && Keyboard.isPressed()) {
     auto st = Keyboard.keysState();
-    if (st.tab) {
+    if (st.opt) {
       state = ST_SETTINGS;
       sett_sel = 0;
       drawSettings();
+      return;
+    }
+    if (st.alt && !gen.active) {
+      tts_enabled = !tts_enabled;
+      updateStatusBar();
       return;
     }
     if (st.fn) {
