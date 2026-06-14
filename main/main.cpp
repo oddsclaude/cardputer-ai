@@ -40,7 +40,7 @@ static Keyboard_Class Keyboard;
 static constexpr int KV_SEQ_LEN = 80;
 static constexpr float DEFAULT_TEMP = 0.8f;
 
-enum AppState { ST_BOOT, ST_CHAT, ST_SETTINGS };
+enum AppState { ST_BOOT, ST_CHAT, ST_SETTINGS, ST_HELP };
 static AppState state = ST_BOOT;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -126,6 +126,16 @@ static void historyPush(const std::string& u, const std::string& b) {
 static void historyClear() {
   for (int i = 0; i < HIST_MAX; i++) { hist_user[i] = ""; hist_bot[i] = ""; }
   hist_n = 0;
+}
+
+static void drawHelp() {
+  static const std::string keys[] = {
+    "tab", "fn", "backtick", "fn + ;", "fn + .", "/new"
+  };
+  static const std::string acts[] = {
+    "open settings", "toggle TTS", "stop generation", "scroll up", "scroll down", "new chat"
+  };
+  ui.showSettings("Keybinds", keys, acts, 6, -1);
 }
 
 static void leaveSettings() {
@@ -351,6 +361,13 @@ static void loop() {
   Keyboard.updateKeyList();
   Keyboard.updateKeysState();
 
+  if (state == ST_HELP) {
+    if (Keyboard.isChange() && Keyboard.isPressed()) {
+      state = ST_SETTINGS;
+      drawSettings();
+    }
+    return;
+  }
   if (state == ST_SETTINGS) {
     if (Keyboard.isChange() && Keyboard.isPressed()) {
       auto st = Keyboard.keysState();
@@ -360,6 +377,7 @@ static void loop() {
         if (c == '.') { sett_sel = (sett_sel + 1) % SETT_N; drawSettings(); }
         if (c == ',') adjustSetting(-1);
         if (c == '/') adjustSetting(+1);
+        if (c == 'h') { state = ST_HELP; drawHelp(); return; }
       }
     }
     return;
