@@ -146,7 +146,8 @@ static void leaveSettings() {
 
 // ---------- TTS ----------
 
-static bool tts_enabled = false;
+static bool tts_enabled    = false;
+static int  tts_spoken_pos = 0;
 
 // ---------- Generation ----------
 
@@ -161,6 +162,17 @@ struct GenState {
   bool pending_nl = false;
   bool wrapped    = false;
 } gen;
+
+static void tts_try_sentence() {
+  if (!tts_enabled || gen.bot_text.empty()) return;
+  size_t len = gen.bot_text.length();
+  char last = gen.bot_text[len - 1];
+  if (last == '.' || last == '!' || last == '?') {
+    std::string sentence = gen.bot_text.substr(tts_spoken_pos);
+    tts_spoken_pos = (int)len;
+    tts_speak(sentence.c_str());
+  }
+}
 
 static void initModel() {
   ui.statusf("Loading model (%u KB)...", (unsigned)(MODEL_DATA_LEN / 1024));
@@ -265,6 +277,7 @@ static void beginGeneration(const std::string& user_text) {
   gen.bot_text    = "";
   gen.pending_nl  = false;
   gen.wrapped     = false;
+  tts_spoken_pos  = 0;
   ui.beginBotReply();
 }
 
@@ -279,8 +292,9 @@ static void finishReply() {
     historyClear();
     ui.statusf("context wrapped - %d tokens - new convo", total_tok);
   }
-  if (tts_enabled && !gen.bot_text.empty()) {
-    tts_speak(gen.bot_text.c_str());
+  if (tts_enabled && tts_spoken_pos < (int)gen.bot_text.length()) {
+    tts_speak(gen.bot_text.substr(tts_spoken_pos).c_str());
+    tts_spoken_pos = (int)gen.bot_text.length();
   }
 }
 
@@ -325,6 +339,7 @@ static void stepGeneration() {
         } else {
           ui.appendBot(piece);
           gen.bot_text += piece;
+          tts_try_sentence();
         }
       } else {
         ui.appendBot(piece);
